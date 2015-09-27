@@ -39,6 +39,9 @@
 #include <map>
 
 
+//////////////////////////////////////////////////////////////////////////////
+// Error codes
+//
 
 //////////////////////////////////////////////////////////////////////////////
 // NikonKsCam class
@@ -66,10 +69,10 @@ public:
 	unsigned GetImageWidth() const{return img_.Width();};
 	unsigned GetImageHeight() const{return img_.Height();};
 	unsigned GetImageBytesPerPixel() const{return img_.Depth();};
-	unsigned GetBitDepth() const{return m_bitDepth;};
+	unsigned GetBitDepth() const{return bitDepth_;};
 	long GetImageBufferSize() const{return img_.Width() * img_.Height() * GetImageBytesPerPixel();}
 	int GetComponentName(unsigned comp, char* name);
-	unsigned GetNumberOfComponents() const{return m_nComponents;};
+	unsigned GetNumberOfComponents() const{return numComponents_;};
 	double GetExposure() const;
 	void SetExposure(double exp);
 	int SetROI(unsigned x, unsigned y, unsigned xSize, unsigned ySize);
@@ -131,51 +134,44 @@ public:
 	int OnExposureChange(MM::PropertyBase* pProp, MM::ActionType eAct, lx_uint32 uiFeatureId);
 	
 	/* KsCam Event Handler must be public */
-	void DoEvent(const lx_uint32 uiCameraHandle, CAM_Event* pstEvent, void* pTransData);
+	void DoEvent(const lx_uint32 eventCameraHandle, CAM_Event* pEvent, void* pTransData);
 
 private:
-	int NikonKsCam::CreateKsProperty(lx_uint32 FeatureId, CPropertyAction* pAct);
-	void NikonKsCam::SearchDevices();
-	void NikonKsCam::bgr8ToBGRA8(unsigned char* dest, unsigned char* src, lx_uint32 width, lx_uint32 height);
-	void NikonKsCam::GrabFrame();
-	void NikonKsCam::SetFeature(lx_uint32 uiFeatureId);
-	void NikonKsCam::GetAllFeaturesDesc();
-	void NikonKsCam::GetAllFeatures();
-	void NikonKsCam::updateImageSettings();
-	void NikonKsCam::SetROILimits();
+	int CreateKsProperty(lx_uint32 FeatureId, CPropertyAction* pAct);
+	void SearchDevices();
+	void Bgr8ToBGRA8(unsigned char* dest, unsigned char* src, lx_uint32 width, lx_uint32 height);
+	void GrabFrame();
+	void SetFeature(lx_uint32 uiFeatureId);
+	void GetAllFeaturesDesc();
+	void GetAllFeatures();
+	void UpdateImageSettings();
+	void SetROILimits();
 	void SetMeteringAreaLimits();
-	void NikonKsCam::Command(const lx_wchar* wszCommand);
-	const char* NikonKsCam::ConvFeatureIdToName(const lx_uint32 uiFeatureId);
-	lx_uint32 NikonKsCam::AdjustExposureTime(lx_uint32 uiValue);
+	void Command(const lx_wchar* wszCommand);
+	const char* ConvFeatureIdToName(const lx_uint32 uiFeatureId);
 
 	//  Device Info ----------------------------------------
-	BOOL m_isOpened;
-	BOOL m_isInitialized;
-	BOOL m_isRi2;
-	lx_uint32 m_uiDeviceIndex;
-	lx_uint32 m_uiDeviceCount;
-	CAM_Device m_stDevice;
-	CAM_Image stImage;
+	BOOL isOpened_;
+	BOOL isInitialized_;
+	BOOL isRi2_;
+	lx_uint32 deviceIndex_;
+	lx_uint32 deviceCount_;
+	CAM_Device device_;
+	CAM_Image image_;
 
 	//  Camera ---------------------------------------------
-	lx_uint32 m_uiCameraHandle;
-	CAM_CMD_GetFrameSize m_stFrameSize;
-	char camID[CAM_NAME_MAX + CAM_VERSION_MAX];
+	lx_uint32 cameraHandle_;
+	CAM_CMD_GetFrameSize frameSize_;
+	char camID_[CAM_NAME_MAX + CAM_VERSION_MAX];
 
 	//  Callback -------------------------------------------
-	void* m_ptrEventTransData;
-
-	//  FrameRate ---------------------------------------------
-	DWORD m_dwStartTick;
-	DWORD m_dwStartTickAve;
-	DWORD m_dwCount;
-	DWORD m_dwCountAve;
+	void* ptrEventData_;
 
 	// Feature ---------------------------------------------
-	Vector_CAM_FeatureValue m_vectFeatureValue;
-	CAM_FeatureDesc* m_pFeatureDesc;
-	CAM_FeatureDescFormat m_stDescFormat;
-	std::map<lx_uint32, lx_uint32> m_mapFeatureIndex;
+	Vector_CAM_FeatureValue vectFeatureValue_;
+	CAM_FeatureDesc* featureDesc_;
+	//CAM_FeatureDescFormat m_stDescFormat;
+	std::map<lx_uint32, lx_uint32> mapFeatureIndex_;
 
 	inline void Free_Vector_CAM_FeatureValue(Vector_CAM_FeatureValue& vectFeatureValue)
 	{
@@ -185,26 +181,17 @@ private:
 			ZeroMemory(&vectFeatureValue, sizeof(Vector_CAM_FeatureValue));
 		}
 	}
-
-	inline void Free_CAM_FeatureDesc()
-	{
-		if (m_pFeatureDesc != NULL)
-		{
-			delete [] m_pFeatureDesc;
-			m_pFeatureDesc = NULL;
-		}
-	}
 	
 	//Image info
 	ImgBuffer img_;
-	long m_image_width;
-	long m_image_height;
-	int m_bitDepth;
-	int m_byteDepth;
-	int m_nComponents;
-	bool m_Color;
+	long imageWidth_;
+	long imageHeight_;
+	int bitDepth_;
+	int byteDepth_;
+	int numComponents_;
+	bool color_;
 
-	MMEvent m_frameDoneEvent; // Signals the sequence thread when a frame was captured
+	MMEvent frameDoneEvent_; // Signals the sequence thread when a frame was captured
 	bool busy_;
 	bool stopOnOverFlow_;
 	MM::MMTime readoutStartTime_;
@@ -216,13 +203,13 @@ private:
 	long imageCounter_;
 	long binSize_;
 	double readoutUs_;
-	volatile double framesPerSecond;
+	volatile double framesPerSecond_;
 
 	MMThreadLock imgPixelsLock_;
 	friend class MySequenceThread;
 	MySequenceThread* thd_;
-	char* cameraBuf; // camera buffer for image transfer
-	int cameraBufId; // buffer id, required by the SDK
+	char* cameraBuf_; // camera buffer for image transfer
+	int cameraBufId_; // buffer id, required by the SDK
 };
 
 class MySequenceThread : public MMDeviceThreadBase
