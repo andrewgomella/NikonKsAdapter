@@ -28,19 +28,14 @@
 #include <boost/algorithm/string.hpp>
 #include <boost/lexical_cast.hpp>
 
-//Nikon SDK defines
-#define countof(A) (sizeof(A) / sizeof((A)[0]))
-/* I am not sure if this number matters in practice as I have never seen the buffer go
-over 1. Perhaps it only matters when using the MultiExposure Feature */
-#define DEF_DRIVER_BUFFER_NUM       5 
-#define DEF_FRAME_SIZE_MAX          (4908 * (3264 + 1) * 3)
+#define KSCAM_BUFFER_NUM       5 
 
 using namespace std;
 
 // External names used used by the rest of the system
 const char* g_CameraDeviceName = "NikonKsCam";
 
-// Feature names that can't be dynamically set through SDK
+// Feature names that aren't dynamically set 
 const char* g_RoiPositionX = "ROI Position X";
 const char* g_RoiPositionY = "ROI Position Y";
 const char* g_TriggerFrameCt = "Trigger Frame Count";
@@ -82,50 +77,51 @@ MODULE_API void DeleteDevice(MM::Device* pDevice)
 
 ///////////////////////////////////////////////////////////////////////////////
 // NikonKsCam implementation
-// ~~~~~~~~~~~~~~~~~~~~~~~~~~
+///////////////////////////////////////////////////////////////////////////////
+
 /* Pointer for KsCam callback function to use */
 NikonKsCam* g_pDlg = NULL;
 
 /* Camera event callback function */
-FCAM_EventCallback fCAM_EventCallback(const lx_uint32 uiCameraHandle,
-                                      CAM_Event* pstEvent, void* pTransData)
+FCAM_EventCallback EventCallback(const lx_uint32 eventCameraHandle,
+                                      CAM_Event* pEvent, void* pTransData)
 {
-    g_pDlg->DoEvent(uiCameraHandle, pstEvent, pTransData);
+    g_pDlg->DoEvent(eventCameraHandle, pEvent, pTransData);
     return nullptr;
 }
 
 /* Camera event callback function handler */
-void NikonKsCam::DoEvent(const lx_uint32 uiCameraHandle, CAM_Event* pstEvent, void* pTransData)
+void NikonKsCam::DoEvent(const lx_uint32 eventCameraHandle, CAM_Event* pEvent, void* pTransData)
 {
-	lx_uint32 lResult = LX_OK;
+	lx_uint32 result = LX_OK;
 	std::ostringstream os;
 	char strWork[CAM_FEA_COMMENT_MAX];
 
-  if ( uiCameraHandle != this->m_uiCameraHandle )
+  if ( eventCameraHandle != this->cameraHandle_ )
   {
    LogMessage("DoEvent Error, Invalid Camera Handle \n");
    return;
   }
-  switch(pstEvent->eEventType)
+  switch(pEvent->eEventType)
   {
     case    ecetImageReceived:
-		os << "ImageRecieved Frameno=" << pstEvent->stImageReceived.uiFrameNo << " uiRemain= " << pstEvent->stImageReceived.uiRemained << endl;
+		os << "ImageRecieved Frameno=" << pEvent->stImageReceived.uiFrameNo << " uiRemain= " << pEvent->stImageReceived.uiRemained << endl;
 		LogMessage(os.str().c_str());
-		/* Signal m_frameDoneEvent so we know an image has been recieved */
-        m_frameDoneEvent.Set();
+		/* Signal frameDoneEvent_ so we know an image has been recieved */
+        frameDoneEvent_.Set();
 		break;
     case    ecetFeatureChanged:
-		strcpy(strWork, ConvFeatureIdToName(pstEvent->stFeatureChanged.uiFeatureId));
+		strcpy(strWork, ConvFeatureIdToName(pEvent->stFeatureChanged.uiFeatureId));
 		os << "Feature Changed Callback: " << strWork << endl;
 		LogMessage(os.str().c_str());
-		/* Update m_vectFeatureValue to have the new stVariant */
-		m_vectFeatureValue.pstFeatureValue[m_mapFeatureIndex[pstEvent->stFeatureChanged.uiFeatureId]].stVariant
-			= pstEvent->stFeatureChanged.stVariant;
+		/* Update vectFeatureValue_ to have the new stVariant */
+		vectFeatureValue_.pstFeatureValue[mapFeatureIndex_[pEvent->stFeatureChanged.uiFeatureId]].stVariant
+			= pEvent->stFeatureChanged.stVariant;
 		/* Update FeatureDesc because it may have changed */
-		lResult = CAM_GetFeatureDesc(m_uiCameraHandle, pstEvent->stFeatureChanged.uiFeatureId,
-			m_pFeatureDesc[m_mapFeatureIndex[pstEvent->stFeatureChanged.uiFeatureId]]);
-		if (lResult != LX_OK) { LogMessage("Error updating featuredesc after callback"); }
-		switch (pstEvent->stFeatureChanged.uiFeatureId){
+		result = CAM_GetFeatureDesc(cameraHandle_, pEvent->stFeatureChanged.uiFeatureId,
+			featureDesc_[mapFeatureIndex_[pEvent->stFeatureChanged.uiFeatureId]]);
+		if (result != LX_OK) { LogMessage("Error updating featuredesc after callback"); }
+		switch (pEvent->stFeatureChanged.uiFeatureId){
 			case eExposureTime:
 				UpdateProperty((char*)MM::g_Keyword_Exposure);
 				break;
@@ -146,13 +142,13 @@ void NikonKsCam::DoEvent(const lx_uint32 uiCameraHandle, CAM_Event* pstEvent, vo
     case    ecetAeDisable:
         break;
     case    ecetTransError:
-		os << "Transmit Error T" << pstEvent->stTransError.uiTick << " UsbErrorCode " << pstEvent->stTransError.uiUsbErrorCode << " DriverErrorCode "
-			<< pstEvent->stTransError.uiDriverErrorCode << " RecievedSize " << pstEvent->stTransError.uiReceivedSize << " SettingSize " 
-			<< pstEvent->stTransError.uiReceivedSize << endl;
+		os << "Transmit Error T" << pEvent->stTransError.uiTick << " UsbErrorCode " << pEvent->stTransError.uiUsbErrorCode << " DriverErrorCode "
+			<< pEvent->stTransError.uiDriverErrorCode << " RecievedSize " << pEvent->stTransError.uiReceivedSize << " SettingSize " 
+			<< pEvent->stTransError.uiReceivedSize << endl;
 		LogMessage(os.str().c_str());
         break;
     case    ecetBusReset:
-		os << "Bus Reset Error Code:" << pstEvent->stBusReset.eBusResetCode << " ImageCleared: " << pstEvent->stBusReset.bImageCleared << endl;
+		os << "Bus Reset Error Code:" << pEvent->stBusReset.eBusResetCode << " ImageCleared: " << pEvent->stBusReset.bImageCleared << endl;
 		LogMessage(os.str().c_str());
         break;
     default:
@@ -172,21 +168,30 @@ void NikonKsCam::DoEvent(const lx_uint32 uiCameraHandle, CAM_Event* pstEvent, vo
 * perform most of the initialization in the Initialize() method.
 */
 NikonKsCam::NikonKsCam() :
-   CCameraBase<NikonKsCam> (),
-   m_isInitialized(false),
-   m_isRi2(false),
-   m_bitDepth(8),
-   m_nComponents(1),
-   sequenceStartTime_(0),
-   roiX_(0),
-   roiY_(0),
-   roiWidth_(0),
-   roiHeight_(0),
-   binSize_(1),
-   readoutUs_(0.0),
-   framesPerSecond(0.0),
-   cameraBuf(nullptr),
-   cameraBufId(0)
+CCameraBase<NikonKsCam>(),
+featureDesc_(NULL),
+isOpened_(false),
+isInitialized_(false),
+isRi2_(false),
+deviceIndex_(0),
+deviceCount_(0),
+bitDepth_(8),
+byteDepth_(0),
+cameraHandle_(0),
+ptrEventData_(nullptr),
+imageWidth_(0),
+imageHeight_(0),
+numComponents_(1),
+sequenceStartTime_(0),
+roiX_(0),
+roiY_(0),
+roiWidth_(0),
+roiHeight_(0),
+binSize_(1),
+readoutUs_(0.0),
+framesPerSecond_(0.0),
+cameraBuf_(nullptr),
+cameraBufId_(0)
 {
    // call the base class method to set-up default error codes/messages
    InitializeDefaultErrorMessages();
@@ -194,12 +199,12 @@ NikonKsCam::NikonKsCam() :
    thd_ = new MySequenceThread(this);
 
    /*Initialize image data buffer*/
-   stImage.pDataBuffer = new BYTE[DEF_FRAME_SIZE_MAX];
+   image_.pDataBuffer = new BYTE[(4908 * (3264 + 1) * 3)];
    
    // Create a pre-initialization property and list all the available cameras
    // Demo cameras will be included in the list 
    auto pAct = new CPropertyAction(this, &NikonKsCam::OnCameraSelection);
-   CreateProperty("Camera", "", MM::String, false, pAct, true);
+   CreateProperty("Camera", "(None)", MM::String, false, pAct, true);
    SearchDevices();
 }
 
@@ -207,38 +212,38 @@ NikonKsCam::NikonKsCam() :
 void NikonKsCam::SearchDevices()
 {
 	auto camName = new char[CAM_NAME_MAX];
-	auto lResult = LX_OK;
-	CAM_Device* m_pstDevice;
+	auto result = LX_OK;
+	CAM_Device* ptrDeviceTemp;
 
-	if (m_uiDeviceCount > 0)
+	if (deviceCount_ > 0)
 	{
-		lResult = CAM_CloseDevices();
-		if (lResult != LX_OK)
+		result = CAM_CloseDevices();
+		if (result != LX_OK)
 		{
 			LogMessage("Close device error!");
 			return;
 		}
 
-		m_pstDevice = nullptr;
-		m_uiDeviceCount = 0;
+		ptrDeviceTemp = nullptr;
+		deviceCount_ = 0;
 	}
 
-	lResult = CAM_OpenDevices(m_uiDeviceCount, &m_pstDevice);
-	if (lResult != LX_OK)
+	result = CAM_OpenDevices(deviceCount_, &ptrDeviceTemp);
+	if (result != LX_OK)
 	{
 		LogMessage("Error calling CAM_OpenDevices().");
 		return;
 	}
 
-	if (m_uiDeviceCount < 0)
+	if (deviceCount_ < 0)
 	{
 		LogMessage("Device is not connected");
 		return;
 	}
 
-	for (size_t i = 0; i < m_uiDeviceCount; i++)
+	for (size_t i = 0; i < deviceCount_; i++)
 	{
-		wcstombs(camName, reinterpret_cast<wchar_t const*>(m_pstDevice[i].wszCameraName), CAM_NAME_MAX);
+		wcstombs(camName, reinterpret_cast<wchar_t const*>(ptrDeviceTemp[i].wszCameraName), CAM_NAME_MAX);
 		AddAllowedValue("Camera", camName);
 	}
 }
@@ -252,7 +257,6 @@ void NikonKsCam::SearchDevices()
 */
 NikonKsCam::~NikonKsCam()
 {
-	//delete stImage.pDataBuffer;
    StopSequenceAcquisition();
    delete thd_;
 }
@@ -278,38 +282,40 @@ void NikonKsCam::GetName(char* name) const
 */
 int NikonKsCam::Initialize()
 {
-	if (m_isInitialized)
+
+	if (isInitialized_)
 	{
 		return DEVICE_OK;
 	}
-
+	
 	auto camName = new char[CAM_NAME_MAX];
 	char strWork[CAM_FEA_COMMENT_MAX];
-	auto lResult = LX_OK;
-	CAM_Device* m_pstDevice;
+	auto result = LX_OK;
+	CAM_Device* ptrDeviceTemp;
 	lx_uint32 i;
 	lx_wchar szError[CAM_ERRMSG_MAX];
-	string camID_string = camID;
+	string camID_string = camID_;
 	ostringstream os;
 
+
 	/* Rescan device list */
-	lResult = CAM_OpenDevices(m_uiDeviceCount, &m_pstDevice);
-	if (lResult != LX_OK)
+	result = CAM_OpenDevices(deviceCount_, &ptrDeviceTemp);
+	if (result != LX_OK)
 	{
 		LogMessage("Error calling CAM_OpenDevices().");
 	}
 
-	os << "Opening Camera: " << camID << endl;
+	os << "Opening Camera: " << camID_ << endl;
 	LogMessage(os.str().c_str());
 
 	/* Find camera in list */
-	for (i = 0; i < m_uiDeviceCount; i++)
+	for (i = 0; i < deviceCount_; i++)
 	{
-		wcstombs(strWork, reinterpret_cast<wchar_t const*>(m_pstDevice[i].wszCameraName), CAM_NAME_MAX);
+		wcstombs(strWork, reinterpret_cast<wchar_t const*>(ptrDeviceTemp[i].wszCameraName), CAM_NAME_MAX);
 
 		if (camID_string.compare(strWork) == 0)
 		{
-			m_uiDeviceIndex = i;
+			deviceIndex_ = i;
 			break;
 		}
 	}
@@ -317,22 +323,22 @@ int NikonKsCam::Initialize()
 	ZeroMemory(szError, sizeof(szError));
 
 	/* Open the camera using the deviceIndex number */
-	lResult = CAM_Open(m_uiDeviceIndex, m_uiCameraHandle, countof(szError), szError);
-	if (lResult != LX_OK)
+		result = CAM_Open(deviceIndex_, cameraHandle_, (sizeof(szError) / sizeof((szError)[0])), szError);
+	if (result != LX_OK)
 	{
-		os << "Error calling CAM_Open():" << szError << " DeviceIndex: " << m_uiDeviceIndex << endl;
+		os << "Error calling CAM_Open():" << szError << " DeviceIndex: " << deviceIndex_ << endl;
 		LogMessage(os.str().c_str());
-		throw DEVICE_ERR ;
+		throw DEVICE_ERR;
 	}
 
 	/* Connection was succesful, set Device info so we can use it later */
-	this->m_stDevice = m_pstDevice[this->m_uiDeviceIndex];
-	this->m_isOpened = TRUE;
+	this->device_ = ptrDeviceTemp[this->deviceIndex_];
+	this->isOpened_ = TRUE;
 
 	/* Setup callback function for event notification and handling */
-	lResult = CAM_SetEventCallback(m_uiCameraHandle, reinterpret_cast<FCAM_EventCallback>(fCAM_EventCallback),
-	                               m_ptrEventTransData);
-	if (lResult != LX_OK)
+	result = CAM_SetEventCallback(cameraHandle_, reinterpret_cast<FCAM_EventCallback>(EventCallback),
+	                               ptrEventData_);
+	if (result != LX_OK)
 	{
 		LogMessage("Error calling CAM_SetEventCallback().");
 		throw DEVICE_ERR ;
@@ -343,18 +349,19 @@ int NikonKsCam::Initialize()
 
 	/* Get all feature values and descriptions */
 	GetAllFeatures();
+
 	GetAllFeaturesDesc();
 
 	/* Ri2 has additional features, check if camera is Ri2 */
-	switch (m_stDevice.eCamDeviceType)
+	switch (device_.eCamDeviceType)
 	{
 	case eRi2:
-		m_isRi2 = TRUE;
+		isRi2_ = TRUE;
 		break;
 	case eQi2:
 		break;
 	case eRi2_Simulator:
-		m_isRi2 = TRUE;
+		isRi2_ = TRUE;
 		break;
 	case eQi2_Simulator:
 		break;
@@ -365,23 +372,23 @@ int NikonKsCam::Initialize()
 	// set property list
 	// -----------------
 	// CameraName
-	wcstombs(camName, reinterpret_cast<wchar_t const*>(m_stDevice.wszCameraName), CAM_NAME_MAX);
+	wcstombs(camName, reinterpret_cast<wchar_t const*>(device_.wszCameraName), CAM_NAME_MAX);
 	auto nRet = CreateProperty(MM::g_Keyword_CameraName, camName, MM::String, true);
 	assert(nRet == DEVICE_OK);
 
 	os.str("");
 	// Read Only Camera Info
-	os << m_stDevice.uiSerialNo << endl;
+	os << device_.uiSerialNo << endl;
 	nRet = CreateProperty("Serial Number", os.str().c_str(), MM::String, true);
-	wcstombs(strWork, reinterpret_cast<wchar_t const*>(m_stDevice.wszFwVersion), CAM_VERSION_MAX);
+	wcstombs(strWork, reinterpret_cast<wchar_t const*>(device_.wszFwVersion), CAM_VERSION_MAX);
 	nRet = CreateProperty("FW Version", strWork, MM::String, true);
-	wcstombs(strWork, reinterpret_cast<wchar_t const*>(m_stDevice.wszFpgaVersion), CAM_VERSION_MAX);
+	wcstombs(strWork, reinterpret_cast<wchar_t const*>(device_.wszFpgaVersion), CAM_VERSION_MAX);
 	nRet = CreateProperty("FPGA Version", strWork, MM::String, true);
-	wcstombs(strWork, reinterpret_cast<wchar_t const*>(m_stDevice.wszFx3Version), CAM_VERSION_MAX);
+	wcstombs(strWork, reinterpret_cast<wchar_t const*>(device_.wszFx3Version), CAM_VERSION_MAX);
 	nRet = CreateProperty("FX3 Version", strWork, MM::String, true);
-	wcstombs(strWork, reinterpret_cast<wchar_t const*>(m_stDevice.wszUsbVersion), CAM_VERSION_MAX);
+	wcstombs(strWork, reinterpret_cast<wchar_t const*>(device_.wszUsbVersion), CAM_VERSION_MAX);
 	nRet = CreateProperty("USB Version", strWork, MM::String, true);
-	wcstombs(strWork, reinterpret_cast<wchar_t const*>(m_stDevice.wszDriverVersion), CAM_VERSION_MAX);
+	wcstombs(strWork, reinterpret_cast<wchar_t const*>(device_.wszDriverVersion), CAM_VERSION_MAX);
 	nRet = CreateProperty("Driver Version", strWork, MM::String, true);
 	assert(nRet == DEVICE_OK);
 
@@ -418,7 +425,7 @@ int NikonKsCam::Initialize()
 
 	//Create properties that are only found on Ri2
 	//(All pertain to color post-processing)
-	if (m_isRi2 == TRUE)
+	if (isRi2_ == TRUE)
 	{
 		pAct = new CPropertyAction(this, &NikonKsCam::OnSharpness);
 		nRet = CreateKsProperty(eSharpness, pAct);
@@ -446,7 +453,7 @@ int NikonKsCam::Initialize()
 	}
 
 	//ROI Position (range is subject to change depending on format!)
-	auto* pFeatureDesc = &m_pFeatureDesc[m_mapFeatureIndex[eRoiPosition]];
+	auto* featureDesc = &featureDesc_[mapFeatureIndex_[eRoiPosition]];
 	pAct = new CPropertyAction(this, &NikonKsCam::OnRoiX);
 	nRet = CreateProperty(g_RoiPositionX, "", MM::Integer, false, pAct);
 	assert(nRet == DEVICE_OK);
@@ -457,15 +464,15 @@ int NikonKsCam::Initialize()
 	SetROILimits();
 
 	//Trigger Options
-	pFeatureDesc = &m_pFeatureDesc[m_mapFeatureIndex[eTriggerOption]];
+	featureDesc = &featureDesc_[mapFeatureIndex_[eTriggerOption]];
 	pAct = new CPropertyAction(this, &NikonKsCam::OnTriggerFrame);
 	nRet = CreateProperty(g_TriggerFrameCt, "", MM::Integer, false, pAct);
-	nRet |= SetPropertyLimits(g_TriggerFrameCt, pFeatureDesc->stTriggerOption.stRangeFrameCount.stMin.ui32Value, pFeatureDesc->stTriggerOption.stRangeFrameCount.stMax.ui32Value);
+	nRet |= SetPropertyLimits(g_TriggerFrameCt, featureDesc->stTriggerOption.stRangeFrameCount.stMin.ui32Value, featureDesc->stTriggerOption.stRangeFrameCount.stMax.ui32Value);
 	assert(nRet == DEVICE_OK);
 
 	pAct = new CPropertyAction(this, &NikonKsCam::OnTriggerDelay);
 	nRet = CreateProperty(g_TriggerFrameDelay, "", MM::Integer, false, pAct);
-	nRet |= SetPropertyLimits(g_TriggerFrameDelay, pFeatureDesc->stTriggerOption.stRangeDelayTime.stMin.i32Value, pFeatureDesc->stTriggerOption.stRangeDelayTime.stMax.i32Value);
+	nRet |= SetPropertyLimits(g_TriggerFrameDelay, featureDesc->stTriggerOption.stRangeDelayTime.stMin.i32Value, featureDesc->stTriggerOption.stRangeDelayTime.stMax.i32Value);
 	assert(nRet == DEVICE_OK);
 
 	//Metering Area (range is subject to change depending on format!)
@@ -531,7 +538,7 @@ int NikonKsCam::Initialize()
 
 	// setup the buffer
 	// ----------------
-	updateImageSettings();
+	UpdateImageSettings();
 
 	// synchronize all properties
 	// --------------------------
@@ -540,7 +547,7 @@ int NikonKsCam::Initialize()
 	if (nRet != DEVICE_OK)
 		return nRet;
 
-	m_isInitialized = true;
+	isInitialized_ = true;
 
 	return DEVICE_OK;
 }
@@ -548,40 +555,40 @@ int NikonKsCam::Initialize()
 /* Create MM Property for a given FeatureId */
 int NikonKsCam::CreateKsProperty(lx_uint32 FeatureId, CPropertyAction *pAct)
 {
-	auto    uiFeatureIndex = m_mapFeatureIndex[FeatureId];
-	auto*	pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiFeatureIndex];
-	auto*   pFeatureDesc = &m_pFeatureDesc[uiFeatureIndex];
+	auto    featureIndex = mapFeatureIndex_[FeatureId];
+	auto*	featureValue = &vectFeatureValue_.pstFeatureValue[featureIndex];
+	auto*   featureDesc = &featureDesc_[featureIndex];
 	char	strWork[50];
 	const char*	strTitle;
 	auto nRet = DEVICE_OK;
 
 
-	/* StrTitle is readable name of feature */
-	strTitle = ConvFeatureIdToName(pFeatureValue->uiFeatureId);
-	printf(strTitle);
-	switch (m_pFeatureDesc[uiFeatureIndex].eFeatureDescType) {
+	/* strTitle is readable name of feature */
+	strTitle = ConvFeatureIdToName(featureValue->uiFeatureId);
+
+	switch (featureDesc_[featureIndex].eFeatureDescType) {
 	case edesc_Range:
-		switch (pFeatureValue->stVariant.eVarType) {
+		switch (featureValue->stVariant.eVarType) {
 		case	evrt_int32:
 			nRet |= CreateProperty(strTitle, "", MM::Integer, false, pAct);
-			nRet |= SetPropertyLimits(strTitle, pFeatureDesc->stRange.stMin.i32Value, pFeatureDesc->stRange.stMax.i32Value);
+			nRet |= SetPropertyLimits(strTitle, featureDesc->stRange.stMin.i32Value, featureDesc->stRange.stMax.i32Value);
 			break;
 		case	evrt_uint32:
-			if(pFeatureValue->uiFeatureId == eExposureTime)
+			if(featureValue->uiFeatureId == eExposureTime)
 			{ 
 				strTitle = const_cast<char*>(MM::g_Keyword_Exposure);
 				CreateProperty(strTitle, "", MM::Float, false, pAct);
-				SetPropertyLimits(strTitle, pFeatureDesc->stRange.stMin.ui32Value/1000, pFeatureDesc->stRange.stMax.ui32Value/1000);
+				SetPropertyLimits(strTitle, featureDesc->stRange.stMin.ui32Value/1000, featureDesc->stRange.stMax.ui32Value/1000);
 			}
-			else if (pFeatureValue->uiFeatureId == eExposureTimeLimit)
+			else if (featureValue->uiFeatureId == eExposureTimeLimit)
 			{
 				CreateProperty(strTitle, "", MM::Float, false, pAct);
-				SetPropertyLimits(strTitle, pFeatureDesc->stRange.stMin.ui32Value/1000, pFeatureDesc->stRange.stMax.ui32Value/1000);
+				SetPropertyLimits(strTitle, featureDesc->stRange.stMin.ui32Value/1000, featureDesc->stRange.stMax.ui32Value/1000);
 			}
 			else
 			{
 				CreateProperty(strTitle, "", MM::Integer, false, pAct);
-				SetPropertyLimits(strTitle, pFeatureDesc->stRange.stMin.ui32Value, pFeatureDesc->stRange.stMax.ui32Value);
+				SetPropertyLimits(strTitle, featureDesc->stRange.stMin.ui32Value, featureDesc->stRange.stMax.ui32Value);
 			}
 			break;
 		default: break;
@@ -598,9 +605,9 @@ int NikonKsCam::CreateKsProperty(lx_uint32 FeatureId, CPropertyAction *pAct)
 		break;
 	case edesc_ElementList:
 		nRet |= CreateProperty(strTitle, "", MM::String, false, pAct);
-		for (auto Index = 0; Index < pFeatureDesc->uiListCount; Index++)
+		for (auto Index = 0; Index < featureDesc->uiListCount; Index++)
 		{
-			wcstombs(strWork, reinterpret_cast<wchar_t const*>(pFeatureDesc->stElementList[Index].wszComment), CAM_FEA_COMMENT_MAX);
+			wcstombs(strWork, reinterpret_cast<wchar_t const*>(featureDesc->stElementList[Index].wszComment), CAM_FEA_COMMENT_MAX);
 			/* OnePushAE is not allowed to be set by User */
 			if (strcmp(strWork, "OnePushAE") != 0)
 				nRet |= AddAllowedValue(strTitle, strWork);
@@ -608,9 +615,9 @@ int NikonKsCam::CreateKsProperty(lx_uint32 FeatureId, CPropertyAction *pAct)
 		break;
 	case edesc_FormatList:
 		nRet |= CreateProperty(strTitle, "", MM::String, false, pAct);
-		for (auto formatIndex = 0; formatIndex < pFeatureDesc->uiListCount; formatIndex++)
+		for (auto formatIndex = 0; formatIndex < featureDesc->uiListCount; formatIndex++)
 		{
-			wcstombs(strWork, reinterpret_cast<wchar_t const*>(pFeatureDesc->stFormatList[formatIndex].wszComment), CAM_FEA_COMMENT_MAX);
+			wcstombs(strWork, reinterpret_cast<wchar_t const*>(featureDesc->stFormatList[formatIndex].wszComment), CAM_FEA_COMMENT_MAX);
 			nRet |= AddAllowedValue(strTitle, strWork);
 		}
 		break;
@@ -623,31 +630,48 @@ int NikonKsCam::CreateKsProperty(lx_uint32 FeatureId, CPropertyAction *pAct)
 	return nRet;
 }
 
-/* This function populates m_vectFeatureValue with all features */
+/* convert FeatureId to readable name */
+const char* NikonKsCam::ConvFeatureIdToName(const lx_uint32 featureId)
+{
+	lx_uint32       i;
+	auto* featureName= new char[30];
+	
+	for (i = 0;; i++)
+	{
+		if (stFeatureNameRef[i].uiFeatureId ==  eUnknown || stFeatureNameRef[i].uiFeatureId == featureId)
+		{
+			break;
+		}
+	}
+	wcstombs(featureName, (wchar_t const *)stFeatureNameRef[i].wszName, 30);
+	return featureName;
+}
+
+/* This function populates vectFeatureValue_ with all features */
 void NikonKsCam::GetAllFeatures()
 {
-	auto lResult = LX_OK;
+	auto result = LX_OK;
 
-    Free_Vector_CAM_FeatureValue(m_vectFeatureValue);
+    Free_Vector_CAM_FeatureValue(vectFeatureValue_);
 
-    m_vectFeatureValue.uiCapacity = CAM_FEA_CAPACITY;
-    m_vectFeatureValue.pstFeatureValue = new
-    CAM_FeatureValue[m_vectFeatureValue.uiCapacity];
+    vectFeatureValue_.uiCapacity = CAM_FEA_CAPACITY;
+    vectFeatureValue_.pstFeatureValue = new
+    CAM_FeatureValue[vectFeatureValue_.uiCapacity];
 
-    if ( !m_vectFeatureValue.pstFeatureValue )
+    if ( !vectFeatureValue_.pstFeatureValue )
     {
 		LogMessage("GetAllFeatures() Memory allocation error. \n");
         return;
     }
 
-    lResult = CAM_GetAllFeatures(m_uiCameraHandle, m_vectFeatureValue);
-    if ( lResult != LX_OK )
+    result = CAM_GetAllFeatures(cameraHandle_, vectFeatureValue_);
+    if ( result != LX_OK )
     {
 		LogMessage("GetAllFeatures() error. \n");
         return;
     }
 
-    if ( m_vectFeatureValue.uiCountUsed == 0 )
+    if ( vectFeatureValue_.uiCountUsed == 0 )
     {
 		LogMessage("Error: GetAllFeatures() returned no features.\n");
         return;
@@ -655,28 +679,28 @@ void NikonKsCam::GetAllFeatures()
     return; 
 }
 
-/* This function creates the feature map and calls featureChanged for every feature. populates all m_pFeatureDesc */
+/* This function creates the feature map and calls featureChanged for every feature. populates all featureDesc_ */
 void NikonKsCam::GetAllFeaturesDesc()
 {
     lx_uint32   uiFeatureId, i;
 
-    Free_CAM_FeatureDesc();
-    m_mapFeatureIndex.clear();
-    m_pFeatureDesc = new CAM_FeatureDesc[m_vectFeatureValue.uiCountUsed];
-    if ( !m_pFeatureDesc )
+    mapFeatureIndex_.clear();
+
+    featureDesc_ = new CAM_FeatureDesc[vectFeatureValue_.uiCountUsed];
+    if ( !featureDesc_ )
     {
 		LogMessage("GetAllFeaturesDesc memory allocate Error.[] \n");
         return;
     }
 
     /* This loops through the total number of features on the device */
-    for( i=0; i<m_vectFeatureValue.uiCountUsed; i++ )
+    for( i=0; i<vectFeatureValue_.uiCountUsed; i++ )
     {
-        uiFeatureId = m_vectFeatureValue.pstFeatureValue[i].uiFeatureId;
+        uiFeatureId = vectFeatureValue_.pstFeatureValue[i].uiFeatureId;
         /* map the FeatureId to i */
-        m_mapFeatureIndex.insert(std::make_pair(uiFeatureId, i));
-	    auto lResult = CAM_GetFeatureDesc(m_uiCameraHandle, uiFeatureId, m_pFeatureDesc[i]);
-		if (lResult != LX_OK)
+        mapFeatureIndex_.insert(std::make_pair(uiFeatureId, i));
+	    auto result = CAM_GetFeatureDesc(cameraHandle_, uiFeatureId, featureDesc_[i]);
+		if (result != LX_OK)
 		{
 			LogMessage("CAM_GetFeatureDesc Error");
 			return;
@@ -687,8 +711,8 @@ void NikonKsCam::GetAllFeaturesDesc()
 /* This function calls SetFeature for a given uiFeatureId */
 void NikonKsCam::SetFeature(lx_uint32 uiFeatureId)
 {
-	auto lResult = LX_OK;
-	lx_uint32                   uiIndex;
+	auto result = LX_OK;
+	lx_uint32                   index;
 	Vector_CAM_FeatureValue     vectFeatureValue;
 
 	/* Prepare the vectFeatureValue structure to use in the CAM_setFeatures command */
@@ -702,12 +726,12 @@ void NikonKsCam::SetFeature(lx_uint32 uiFeatureId)
 		return;
 	}
 
-	uiIndex = m_mapFeatureIndex[uiFeatureId];
-	vectFeatureValue.pstFeatureValue[0] = m_vectFeatureValue.pstFeatureValue[uiIndex];
+	index = mapFeatureIndex_[uiFeatureId];
+	vectFeatureValue.pstFeatureValue[0] = vectFeatureValue_.pstFeatureValue[index];
 
-	lResult = CAM_SetFeatures(m_uiCameraHandle, vectFeatureValue);
+	result = CAM_SetFeatures(cameraHandle_, vectFeatureValue);
 	Free_Vector_CAM_FeatureValue(vectFeatureValue);
-	if (lResult != LX_OK)
+	if (result != LX_OK)
 	{
 		LogMessage("CAM_SetFeatures Error");
 		GetAllFeatures(); 
@@ -721,16 +745,16 @@ void NikonKsCam::SetFeature(lx_uint32 uiFeatureId)
 /* This function calls CAM_Command */
 void NikonKsCam::Command(const lx_wchar* wszCommand)
 {
-	auto lResult = LX_OK;
+	auto result = LX_OK;
 
 	if (!_wcsicmp(reinterpret_cast<wchar_t const *>(wszCommand), CAM_CMD_START_FRAMETRANSFER))
 	{
 		CAM_CMD_StartFrameTransfer      stCmd;
 
 		/* Start frame transfer */
-		stCmd.uiImageBufferNum = DEF_DRIVER_BUFFER_NUM;
-		lResult = CAM_Command(m_uiCameraHandle, CAM_CMD_START_FRAMETRANSFER, &stCmd);
-		if (lResult != LX_OK)
+		stCmd.uiImageBufferNum = KSCAM_BUFFER_NUM;
+		result = CAM_Command(cameraHandle_, CAM_CMD_START_FRAMETRANSFER, &stCmd);
+		if (result != LX_OK)
 		{
 			LogMessage("CAM_Command start frame transfer error");
 			return;
@@ -738,8 +762,8 @@ void NikonKsCam::Command(const lx_wchar* wszCommand)
 	}
 	else
 	{
-		lResult = CAM_Command(m_uiCameraHandle, wszCommand, nullptr);
-		if (lResult != LX_OK)
+		result = CAM_Command(cameraHandle_, wszCommand, nullptr);
+		if (result != LX_OK)
 		{
 			LogMessage("CAM_Command error");
 			return;
@@ -750,76 +774,76 @@ void NikonKsCam::Command(const lx_wchar* wszCommand)
 
 /* This should be called at initialization after features have been received, as well as whenever imgFormat is changed
 /* it should update the image buffer to have the proper width/height/depth as well as update relevant Properties */ 
-void NikonKsCam::updateImageSettings()
+void NikonKsCam::UpdateImageSettings()
 {
-  auto lResult = LX_OK;
+  auto result = LX_OK;
 
-  switch(m_vectFeatureValue.pstFeatureValue[m_mapFeatureIndex[eFormat]].stVariant.stFormat.eColor)
+  switch(vectFeatureValue_.pstFeatureValue[mapFeatureIndex_[eFormat]].stVariant.stFormat.eColor)
   {
 	case ecfcUnknown:
 	  LogMessage("Error: unknown image type.");
       break;
 	case ecfcRgb24:
-	  m_nComponents = 4;
-	  m_byteDepth = 4;
-      m_bitDepth = 8;
-	  m_Color = true;
+	  numComponents_ = 4;
+	  byteDepth_ = 4;
+      bitDepth_ = 8;
+	  color_ = true;
       break;
 	case ecfcYuv444:
-	  m_nComponents = 4;
-	  m_byteDepth = 4;
-	  m_bitDepth = 8;
-	  m_Color = true;
+	  numComponents_ = 4;
+	  byteDepth_ = 4;
+	  bitDepth_ = 8;
+	  color_ = true;
       break;
 	case ecfcMono16:
-	  m_nComponents = 1;
-	  m_byteDepth = 2;
-      m_bitDepth = 16;
-	  m_Color = false;
+	  numComponents_ = 1;
+	  byteDepth_ = 2;
+      bitDepth_ = 16;
+	  color_ = false;
       break;
   }
 
-  switch(m_vectFeatureValue.pstFeatureValue[m_mapFeatureIndex[eFormat]].stVariant.stFormat.eMode)
+  switch(vectFeatureValue_.pstFeatureValue[mapFeatureIndex_[eFormat]].stVariant.stFormat.eMode)
   {
 	case ecfmUnknown:
 	  LogMessage("Error: unknown image resolution.");
       break;
 	case ecfm4908x3264:
-      m_image_width=4908;
-      m_image_height=3264;
+      imageWidth_=4908;
+      imageHeight_=3264;
       break;
 	case ecfm2454x1632:
-      m_image_width=2454;
-      m_image_height=1632;    
+      imageWidth_=2454;
+      imageHeight_=1632;    
       break;
 	case ecfm1636x1088:
-      m_image_width=1636;
-      m_image_height=1088;   
+      imageWidth_=1636;
+      imageHeight_=1088;   
       break;
 	case ecfm818x544:
-      m_image_width=818;
-      m_image_height=544;   
+      imageWidth_=818;
+      imageHeight_=544;   
       break;
 	case ecfm1608x1608:
-      m_image_width=1608;
-      m_image_height=1608;   
+      imageWidth_=1608;
+      imageHeight_=1608;   
       break;
 	case ecfm804x804:
-      m_image_width=804;
-      m_image_height=804; 
+      imageWidth_=804;
+      imageHeight_=804; 
       break;
 	case ecfm536x536:
-      m_image_width=536;
-      m_image_height=536; 
+      imageWidth_=536;
+      imageHeight_=536; 
       break;
   }
 
   /* Update the buffer to have the proper width height and depth */
-  img_.Resize(m_image_width, m_image_height, m_byteDepth);
+  img_.Resize(imageWidth_, imageHeight_, byteDepth_);
 
-  /* Update m_stFrameSize so we know how to size stImage in the GetImage() calls to driver*/
-  lResult = CAM_Command(m_uiCameraHandle, CAM_CMD_GET_FRAMESIZE, &m_stFrameSize);
-  if ( lResult != LX_OK )
+  /* Update frameSize_ so we know how to size image_ in the GetImage() calls to driver*/
+  result = CAM_Command(cameraHandle_, CAM_CMD_GET_FRAMESIZE, &frameSize_);
+  if ( result != LX_OK )
   { 
 	  LogMessage("GetFrameSize Error.");
   }
@@ -829,27 +853,27 @@ void NikonKsCam::updateImageSettings()
 /* Update ROI Property x and y limits */
 void NikonKsCam::SetROILimits()
 {
-	auto lResult = CAM_GetFeatureDesc(m_uiCameraHandle, eRoiPosition,
-		m_pFeatureDesc[m_mapFeatureIndex[eRoiPosition]]);
-	if (lResult != LX_OK)
+	auto result = CAM_GetFeatureDesc(cameraHandle_, eRoiPosition,
+		featureDesc_[mapFeatureIndex_[eRoiPosition]]);
+	if (result != LX_OK)
 	{
 		LogMessage("CAM_GetFeatureDesc Error");
 		return;
 	}
 
-	auto pROIFeatureDesc = &m_pFeatureDesc[m_mapFeatureIndex[eRoiPosition]];
+	auto roiFeatureDesc = &featureDesc_[mapFeatureIndex_[eRoiPosition]];
 	
 	/* If not in an ROI format setting (e.g. full frame), SDK will return min=max=1 */
 	/* which will cause an error in micromanager SetPropertyLimits() function */
 	/* for now just set min to 0 and max to 1 */
-	if (pROIFeatureDesc->stPosition.stMin.uiX == pROIFeatureDesc->stPosition.stMax.uiX)
+	if (roiFeatureDesc->stPosition.stMin.uiX == roiFeatureDesc->stPosition.stMax.uiX)
 	{
 		SetPropertyLimits(g_RoiPositionX, 0, 1);
 		SetPropertyLimits(g_RoiPositionY, 0, 1);
 	}
 	else{
-		SetPropertyLimits(g_RoiPositionX, pROIFeatureDesc->stPosition.stMin.uiX, pROIFeatureDesc->stPosition.stMax.uiX);
-		SetPropertyLimits(g_RoiPositionY, pROIFeatureDesc->stPosition.stMin.uiY, pROIFeatureDesc->stPosition.stMax.uiY);
+		SetPropertyLimits(g_RoiPositionX, roiFeatureDesc->stPosition.stMin.uiX, roiFeatureDesc->stPosition.stMax.uiX);
+		SetPropertyLimits(g_RoiPositionY, roiFeatureDesc->stPosition.stMin.uiY, roiFeatureDesc->stPosition.stMax.uiY);
 	}
 	UpdateProperty(g_RoiPositionX);
 	UpdateProperty(g_RoiPositionY);
@@ -858,18 +882,18 @@ void NikonKsCam::SetROILimits()
 /* Update Metering Area limits */
 void NikonKsCam::SetMeteringAreaLimits()
 {
-	auto lResult = CAM_GetFeatureDesc(m_uiCameraHandle, eMeteringArea,	m_pFeatureDesc[m_mapFeatureIndex[eMeteringArea]]);
-	if (lResult != LX_OK)
+	auto result = CAM_GetFeatureDesc(cameraHandle_, eMeteringArea,	featureDesc_[mapFeatureIndex_[eMeteringArea]]);
+	if (result != LX_OK)
 	{
 		LogMessage("CAM_GetFeatureDesc Error");
 		return;
 	}
-	auto pFeatureDesc = &m_pFeatureDesc[m_mapFeatureIndex[eMeteringArea]];
+	auto featureDesc = &featureDesc_[mapFeatureIndex_[eMeteringArea]];
 
-	SetPropertyLimits(g_MeteringAreaLeft, pFeatureDesc->stArea.stMin.uiLeft, pFeatureDesc->stArea.stMax.uiLeft);
-	SetPropertyLimits(g_MeteringAreaTop, pFeatureDesc->stArea.stMin.uiTop, pFeatureDesc->stArea.stMax.uiTop);
-	SetPropertyLimits(g_MeteringAreaWidth, pFeatureDesc->stArea.stMin.uiWidth, pFeatureDesc->stArea.stMax.uiWidth);
-	SetPropertyLimits(g_MeteringAreaHeight, pFeatureDesc->stArea.stMin.uiHeight, pFeatureDesc->stArea.stMax.uiHeight);
+	SetPropertyLimits(g_MeteringAreaLeft, featureDesc->stArea.stMin.uiLeft, featureDesc->stArea.stMax.uiLeft);
+	SetPropertyLimits(g_MeteringAreaTop, featureDesc->stArea.stMin.uiTop, featureDesc->stArea.stMax.uiTop);
+	SetPropertyLimits(g_MeteringAreaWidth, featureDesc->stArea.stMin.uiWidth, featureDesc->stArea.stMax.uiWidth);
+	SetPropertyLimits(g_MeteringAreaHeight, featureDesc->stArea.stMin.uiHeight, featureDesc->stArea.stMax.uiHeight);
 
 	UpdateProperty(g_MeteringAreaLeft);
 	UpdateProperty(g_MeteringAreaTop);
@@ -887,23 +911,27 @@ void NikonKsCam::SetMeteringAreaLimits()
 */
 int NikonKsCam::Shutdown()
 {
-  auto lResult = LX_OK;
+  auto result = LX_OK;
   
-  if ( this->m_isOpened )
+  if ( this->isOpened_ )
   {
-      lResult = CAM_Close(m_uiCameraHandle);
-      if ( lResult != LX_OK )
-      {
-        LogMessage("Error Closing Camera.");
-      }
-      Free_Vector_CAM_FeatureValue(m_vectFeatureValue);
-      Free_CAM_FeatureDesc();
-      this->m_uiDeviceIndex = 0;
-      this->m_uiCameraHandle = 0;
-      this->m_isOpened = FALSE;
-	  this->m_isInitialized = FALSE;
-	  this->m_isRi2 = FALSE;
-      g_pDlg = nullptr;
+	result = CAM_Close(cameraHandle_);
+	if ( result != LX_OK )
+	{
+	LogMessage("Error Closing Camera.");
+	}
+	Free_Vector_CAM_FeatureValue(vectFeatureValue_);
+	if (featureDesc_ != NULL)
+	{
+		delete [] featureDesc_;
+		featureDesc_ = NULL;
+	}
+	this->deviceIndex_ = 0;
+	this->cameraHandle_ = 0;
+	this->isOpened_ = FALSE;
+	this->isInitialized_ = FALSE;
+	this->isRi2_ = FALSE;
+	g_pDlg = nullptr;
   }
 
   return DEVICE_OK;
@@ -918,7 +946,7 @@ int NikonKsCam::Shutdown()
 int NikonKsCam::SnapImage()
 {
   //Determine exposureLength so we know a reasonable time to wait for frame arrival
-  auto exposureLength = m_vectFeatureValue.pstFeatureValue[m_mapFeatureIndex[eExposureTime]].stVariant.ui32Value / 1000;
+  auto exposureLength = vectFeatureValue_.pstFeatureValue[mapFeatureIndex_[eExposureTime]].stVariant.ui32Value / 1000;
   char buf[MM::MaxStrLength];
   //Determine current trigger mode
   GetProperty(ConvFeatureIdToName(eTriggerMode), buf);
@@ -929,7 +957,7 @@ int NikonKsCam::SnapImage()
 	  Command(CAM_CMD_ONEPUSH_SOFTTRIGGER);
   //Wait for frameDoneEvent from callback method
   // (time out after exposure length + 100 ms)
-  m_frameDoneEvent.Wait(exposureLength + 100);
+  frameDoneEvent_.Wait(exposureLength + 100);
   Command(CAM_CMD_STOP_FRAMETRANSFER);
   GrabFrame();
 
@@ -939,30 +967,30 @@ int NikonKsCam::SnapImage()
 //Call after a frame is recieved to get the image from camera and copy to img_ buffer
 void NikonKsCam::GrabFrame()
 {
-	lx_result           lResult = LX_OK;
+	lx_result           result;
 	lx_uint32           uiRemained;
 
-	/* Set stImage buffer to appropriate size */
-	stImage.uiDataBufferSize = this->m_stFrameSize.uiFrameSize;
+	/* Set image_ buffer to appropriate size */
+	image_.uiDataBufferSize = this->frameSize_.uiFrameSize;
 
 	/* Grab the Image */
-	lResult = CAM_GetImage(m_uiCameraHandle, true, stImage, uiRemained);
-	if (lResult != LX_OK)
+	result = CAM_GetImage(cameraHandle_, true, image_, uiRemained);
+	if (result != LX_OK)
 	{
 		LogMessage("CAM_GetImage error.");
 	}
 
-	if (m_Color)
-		bgr8ToBGRA8(img_.GetPixelsRW(), (uint8_t*)stImage.pDataBuffer, img_.Width(), img_.Height());
+	if (color_)
+		Bgr8ToBGRA8(img_.GetPixelsRW(), (uint8_t*)image_.pDataBuffer, img_.Width(), img_.Height());
 	else
-	    memcpy(img_.GetPixelsRW(), stImage.pDataBuffer, img_.Width()*img_.Height()*img_.Depth());
+	    memcpy(img_.GetPixelsRW(), image_.pDataBuffer, img_.Width()*img_.Height()*img_.Depth());
 	
 }
 
 //copied from MM dc1394.cpp driver file 
 //EF: converts bgr image to Micromanager BGRA
 // It is the callers responsibility that both src and destination exist
-void NikonKsCam::bgr8ToBGRA8(unsigned char* dest, unsigned char* src, unsigned int width, unsigned int height)
+void NikonKsCam::Bgr8ToBGRA8(unsigned char* dest, unsigned char* src, unsigned int width, unsigned int height)
 {
 	for (register uint64_t i = 0, j = 0; i < (width * height * 3); i += 3, j += 4)
 	{ 
@@ -1135,8 +1163,8 @@ int NikonKsCam::StartSequenceAcquisition(long numImages, double interval_ms, boo
    sequenceStartTime_ = GetCurrentMMTime();
    imageCounter_ = 0;
    
-   auto*   pFeatureDesc = &m_pFeatureDesc[m_mapFeatureIndex[eTriggerMode]];
-   wcstombs(triggerOffChar, reinterpret_cast<wchar_t const*>(pFeatureDesc->stElementList[ectmOff].wszComment), CAM_FEA_COMMENT_MAX);
+   auto*   featureDesc = &featureDesc_[mapFeatureIndex_[eTriggerMode]];
+   wcstombs(triggerOffChar, reinterpret_cast<wchar_t const*>(featureDesc->stElementList[ectmOff].wszComment), CAM_FEA_COMMENT_MAX);
    
    char triggerMode[MM::MaxStrLength];
    /* if not in trigger mode:off set to trigger mode: off (for "live view") */
@@ -1200,12 +1228,10 @@ int NikonKsCam::InsertImage()
  */
 int NikonKsCam::ThreadRun (void)
 {
-   lx_uint32 lResult = LX_OK;
-   lx_uint32 uiRemained;
    MM::MMTime startFrame = GetCurrentMMTime();
 
-   auto exposureLength = m_vectFeatureValue.pstFeatureValue[m_mapFeatureIndex[eExposureTime]].stVariant.ui32Value / 1000;
-   DWORD dwRet = m_frameDoneEvent.Wait(exposureLength + 300);//wait up to exposure length + 250 ms
+   auto exposureLength = vectFeatureValue_.pstFeatureValue[mapFeatureIndex_[eExposureTime]].stVariant.ui32Value / 1000;
+   DWORD dwRet = frameDoneEvent_.Wait(exposureLength + 300);//wait up to exposure length + 250 ms
 
    if (dwRet == MM_WAIT_TIMEOUT)
    {
@@ -1220,7 +1246,7 @@ int NikonKsCam::ThreadRun (void)
 
       MM::MMTime frameInterval = GetCurrentMMTime() - startFrame;
       if (frameInterval.getMsec() > 0.0)
-         framesPerSecond = 1000.0 / frameInterval.getMsec();
+         framesPerSecond_ = 1000.0 / frameInterval.getMsec();
 
       return ret;
    }
@@ -1344,13 +1370,13 @@ int NikonKsCam::OnCameraSelection(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
 	if (eAct == MM::BeforeGet)
 	{
-		pProp->Set(camID);
+		pProp->Set(camID_);
 	}
 	else if (eAct == MM::AfterSet)
 	{
 		string value;
 		pProp->Get(value);
-		strcpy(camID, value.c_str());
+		strcpy(camID_, value.c_str());
 	}
 	return DEVICE_OK;
 }
@@ -1464,19 +1490,19 @@ int NikonKsCam::OnGainLimit(MM::PropertyBase* pProp, MM::ActionType eAct)
 int NikonKsCam::OnMeteringAreaLeft(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
 	long value;
-	lx_uint32 uiIndex = m_mapFeatureIndex[eMeteringArea];
-	CAM_FeatureValue*   pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
+	lx_uint32 index = mapFeatureIndex_[eMeteringArea];
+	CAM_FeatureValue*   featureValue = &vectFeatureValue_.pstFeatureValue[index];
 
 	if (eAct == MM::AfterSet)
 	{
 		pProp->Get(value);
-		pFeatureValue->stVariant.stArea.uiLeft = value;
-		SetFeature(pFeatureValue->uiFeatureId);
+		featureValue->stVariant.stArea.uiLeft = value;
+		SetFeature(featureValue->uiFeatureId);
 	}
 
 	if (eAct == MM::BeforeGet || eAct == MM::AfterSet)
 	{
-		pProp->Set((long)m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.stArea.uiLeft);
+		pProp->Set((long)vectFeatureValue_.pstFeatureValue[index].stVariant.stArea.uiLeft);
 	}
 	return DEVICE_OK;
 }
@@ -1484,19 +1510,19 @@ int NikonKsCam::OnMeteringAreaLeft(MM::PropertyBase* pProp, MM::ActionType eAct)
 int NikonKsCam::OnMeteringAreaTop(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
 	long value;
-	lx_uint32 uiIndex = m_mapFeatureIndex[eMeteringArea];
-	CAM_FeatureValue*   pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
+	lx_uint32 index = mapFeatureIndex_[eMeteringArea];
+	CAM_FeatureValue*   featureValue = &vectFeatureValue_.pstFeatureValue[index];
 
 	if (eAct == MM::AfterSet)
 	{
 		pProp->Get(value);
-		pFeatureValue->stVariant.stArea.uiTop = value;
-		SetFeature(pFeatureValue->uiFeatureId);
+		featureValue->stVariant.stArea.uiTop = value;
+		SetFeature(featureValue->uiFeatureId);
 	}
 
 	if (eAct == MM::BeforeGet || eAct == MM::AfterSet)
 	{
-		pProp->Set((long)m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.stArea.uiTop);
+		pProp->Set((long)vectFeatureValue_.pstFeatureValue[index].stVariant.stArea.uiTop);
 	}
 	return DEVICE_OK;
 }
@@ -1504,79 +1530,79 @@ int NikonKsCam::OnMeteringAreaTop(MM::PropertyBase* pProp, MM::ActionType eAct)
 int NikonKsCam::OnMeteringAreaWidth(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
 	long value;
-	lx_uint32 uiIndex = m_mapFeatureIndex[eMeteringArea];
-	CAM_FeatureValue*   pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
+	lx_uint32 index = mapFeatureIndex_[eMeteringArea];
+	CAM_FeatureValue*   featureValue = &vectFeatureValue_.pstFeatureValue[index];
 
 	if (eAct == MM::AfterSet)
 	{
 		pProp->Get(value);
-		pFeatureValue->stVariant.stArea.uiWidth = value;
-		SetFeature(pFeatureValue->uiFeatureId);
+		featureValue->stVariant.stArea.uiWidth = value;
+		SetFeature(featureValue->uiFeatureId);
 	}
 
 	if (eAct == MM::BeforeGet || eAct == MM::AfterSet)
 	{
-		pProp->Set((long)m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.stArea.uiWidth);
+		pProp->Set((long)vectFeatureValue_.pstFeatureValue[index].stVariant.stArea.uiWidth);
 	}
 	return DEVICE_OK;
 }
 
 int NikonKsCam::OnMeteringAreaHeight(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
-	long value;
-	lx_uint32 uiIndex = m_mapFeatureIndex[eMeteringArea];
-	CAM_FeatureValue*   pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
+	lx_uint32 index = mapFeatureIndex_[eMeteringArea];
+	CAM_FeatureValue*   featureValue = &vectFeatureValue_.pstFeatureValue[index];
 
 	if (eAct == MM::AfterSet)
 	{
+		long value;
 		pProp->Get(value);
-		pFeatureValue->stVariant.stArea.uiHeight = value;
-		SetFeature(pFeatureValue->uiFeatureId);
+		featureValue->stVariant.stArea.uiHeight = value;
+		SetFeature(featureValue->uiFeatureId);
 	}
 
 	if (eAct == MM::BeforeGet || eAct == MM::AfterSet)
 	{
-		pProp->Set((long)m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.stArea.uiHeight);
+		pProp->Set((long)vectFeatureValue_.pstFeatureValue[index].stVariant.stArea.uiHeight);
 	}
 	return DEVICE_OK;
 }
 
 int NikonKsCam::OnRoiX(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
-	long value;
-	lx_uint32 uiIndex = m_mapFeatureIndex[eRoiPosition];
-	CAM_FeatureValue*   pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
+	lx_uint32 index = mapFeatureIndex_[eRoiPosition];
+	CAM_FeatureValue*   featureValue = &vectFeatureValue_.pstFeatureValue[index];
 
 	if (eAct == MM::AfterSet)
 	{
+		long value;
 		pProp->Get(value);
-		pFeatureValue->stVariant.stPosition.uiX = value;
-		SetFeature(pFeatureValue->uiFeatureId);
+		featureValue->stVariant.stPosition.uiX = value;
+		SetFeature(featureValue->uiFeatureId);
 	}
 
 	if (eAct == MM::BeforeGet || eAct == MM::AfterSet)
 	{
-		pProp->Set((long)m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.stPosition.uiX);
+		pProp->Set((long)vectFeatureValue_.pstFeatureValue[index].stVariant.stPosition.uiX);
 	}
 	return DEVICE_OK;
 }
 
 int NikonKsCam::OnRoiY(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
-	long value;
-	lx_uint32 uiIndex = m_mapFeatureIndex[eRoiPosition];
-	CAM_FeatureValue*   pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
+	lx_uint32 index = mapFeatureIndex_[eRoiPosition];
+	CAM_FeatureValue*   featureValue = &vectFeatureValue_.pstFeatureValue[index];
 
     if (eAct == MM::AfterSet)
 	{
+		long value;
 		pProp->Get(value);
-		pFeatureValue->stVariant.stPosition.uiY = value;
-		SetFeature(pFeatureValue->uiFeatureId);
+		featureValue->stVariant.stPosition.uiY = value;
+		SetFeature(featureValue->uiFeatureId);
 	}
 
 	if (eAct == MM::BeforeGet || eAct == MM::AfterSet)
 	{
-		pProp->Set((long)m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.stPosition.uiY);
+		pProp->Set((long)vectFeatureValue_.pstFeatureValue[index].stVariant.stPosition.uiY);
 	}
 
 	return DEVICE_OK;
@@ -1585,37 +1611,37 @@ int NikonKsCam::OnRoiY(MM::PropertyBase* pProp, MM::ActionType eAct)
 int NikonKsCam::OnTriggerFrame(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
 	long value;
-	lx_uint32 uiIndex = m_mapFeatureIndex[eTriggerOption];
-	CAM_FeatureValue*   pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
+	lx_uint32 index = mapFeatureIndex_[eTriggerOption];
+	CAM_FeatureValue*   featureValue = &vectFeatureValue_.pstFeatureValue[index];
 
 	if (eAct == MM::BeforeGet)
 	{
-		pProp->Set((long)m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.stTriggerOption.iDelayTime);
+		pProp->Set((long)vectFeatureValue_.pstFeatureValue[index].stVariant.stTriggerOption.iDelayTime);
 	}
 	else if (eAct == MM::AfterSet)
 	{
 		pProp->Get(value);
-		pFeatureValue->stVariant.stTriggerOption.uiFrameCount = value;
-		SetFeature(pFeatureValue->uiFeatureId);
+		featureValue->stVariant.stTriggerOption.uiFrameCount = value;
+		SetFeature(featureValue->uiFeatureId);
 	}
 	return DEVICE_OK;
 }
 
 int NikonKsCam::OnTriggerDelay(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
-	lx_uint32 uiIndex = m_mapFeatureIndex[eTriggerOption];
+	lx_uint32 index = mapFeatureIndex_[eTriggerOption];
 	long value;
-	CAM_FeatureValue*   pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
+	CAM_FeatureValue*   featureValue = &vectFeatureValue_.pstFeatureValue[index];
 
 	if (eAct == MM::BeforeGet)
 	{
-		pProp->Set((long)m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.stTriggerOption.iDelayTime);
+		pProp->Set((long)vectFeatureValue_.pstFeatureValue[index].stVariant.stTriggerOption.iDelayTime);
 	}
 	else if (eAct == MM::AfterSet)
 	{
 		pProp->Get(value);
-		pFeatureValue->stVariant.stTriggerOption.iDelayTime = value;
-		SetFeature(pFeatureValue->uiFeatureId);
+		featureValue->stVariant.stTriggerOption.iDelayTime = value;
+		SetFeature(featureValue->uiFeatureId);
 	}
 	return DEVICE_OK;
 }
@@ -1624,26 +1650,26 @@ int NikonKsCam::OnImageFormat(MM::PropertyBase* pProp, MM::ActionType eAct)
 {
 	char strWork[30];
 	lx_uint32 uiFeatureId = eFormat;
-	lx_uint32 uiIndex = m_mapFeatureIndex[uiFeatureId];
-	CAM_FeatureDesc*    pFeatureDesc;
-	CAM_FeatureValue*   pFeatureValue;
-	pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
-	pFeatureDesc = &m_pFeatureDesc[uiIndex];
+	lx_uint32 index = mapFeatureIndex_[uiFeatureId];
+	CAM_FeatureDesc*    featureDesc;
+	CAM_FeatureValue*   featureValue;
+	featureValue = &vectFeatureValue_.pstFeatureValue[index];
+	featureDesc = &featureDesc_[index];
 
 	if (eAct == MM::AfterSet)
 	{
 		string value;
 		lx_uint32 i, index;
 		pProp->Get(value);
-		for (i = 0; i < pFeatureDesc->uiListCount; i++)
+		for (i = 0; i < featureDesc->uiListCount; i++)
 		{
-			wcstombs(strWork, pFeatureDesc->stFormatList[i].wszComment, CAM_FEA_COMMENT_MAX);
+			wcstombs(strWork, featureDesc->stFormatList[i].wszComment, CAM_FEA_COMMENT_MAX);
 			if (value.compare(strWork) == 0)
 			{
 				LogMessage(strWork);
-				pFeatureValue->stVariant.stFormat = pFeatureDesc->stFormatList[i].stFormat;
-				SetFeature(pFeatureValue->uiFeatureId);
-				updateImageSettings();
+				featureValue->stVariant.stFormat = featureDesc->stFormatList[i].stFormat;
+				SetFeature(featureValue->uiFeatureId);
+				UpdateImageSettings();
 				//Update ROI, MeteringArea limits, they change with format setting
 				SetROILimits();
 				SetMeteringAreaLimits();
@@ -1653,11 +1679,11 @@ int NikonKsCam::OnImageFormat(MM::PropertyBase* pProp, MM::ActionType eAct)
 	}
 	if (eAct == MM::BeforeGet || eAct == MM::AfterSet )
 	{
-		for (lx_uint32 i = 0; i < pFeatureDesc->uiListCount; i++)
+		for (lx_uint32 i = 0; i < featureDesc->uiListCount; i++)
 		{
-			if (pFeatureDesc->stFormatList[i].stFormat == pFeatureValue->stVariant.stFormat)
+			if (featureDesc->stFormatList[i].stFormat == featureValue->stVariant.stFormat)
 			{
-				wcstombs(strWork, pFeatureDesc->stFormatList[i].wszComment, CAM_FEA_COMMENT_MAX);
+				wcstombs(strWork, featureDesc->stFormatList[i].wszComment, CAM_FEA_COMMENT_MAX);
 				pProp->Set(strWork);
 				break;
 			}
@@ -1669,31 +1695,31 @@ int NikonKsCam::OnImageFormat(MM::PropertyBase* pProp, MM::ActionType eAct)
 //Generic - Handle "Range" feature
 int NikonKsCam::OnRange(MM::PropertyBase* pProp, MM::ActionType eAct, lx_uint32 uiFeatureId)
 {
-	lx_uint32 uiIndex = m_mapFeatureIndex[uiFeatureId];
+	lx_uint32 index = mapFeatureIndex_[uiFeatureId];
 	long value;
-	CAM_FeatureValue*   pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
-	switch (pFeatureValue->stVariant.eVarType){
+	CAM_FeatureValue*   featureValue = &vectFeatureValue_.pstFeatureValue[index];
+	switch (featureValue->stVariant.eVarType){
 	case evrt_uint32:
 		if (eAct == MM::BeforeGet)
 		{
-			pProp->Set((long)m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.ui32Value);
+			pProp->Set((long)vectFeatureValue_.pstFeatureValue[index].stVariant.ui32Value);
 		}
 		else if (eAct == MM::AfterSet)
 		{
 			pProp->Get(value);
-			pFeatureValue->stVariant.ui32Value = value;
-			SetFeature(pFeatureValue->uiFeatureId);
+			featureValue->stVariant.ui32Value = value;
+			SetFeature(featureValue->uiFeatureId);
 		}
 	case evrt_int32:
 		if (eAct == MM::BeforeGet)
 		{
-			pProp->Set((long)m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.i32Value);
+			pProp->Set((long)vectFeatureValue_.pstFeatureValue[index].stVariant.i32Value);
 		}
 		else if (eAct == MM::AfterSet)
 		{
 			pProp->Get(value);
-			pFeatureValue->stVariant.i32Value = value;
-			SetFeature(pFeatureValue->uiFeatureId);
+			featureValue->stVariant.i32Value = value;
+			SetFeature(featureValue->uiFeatureId);
 		}
 	}
 	return DEVICE_OK;
@@ -1703,17 +1729,17 @@ int NikonKsCam::OnRange(MM::PropertyBase* pProp, MM::ActionType eAct, lx_uint32 
 int NikonKsCam::OnList(MM::PropertyBase* pProp, MM::ActionType eAct, lx_uint32 uiFeatureId)
 {
 	char strWork[30];
-	lx_uint32 uiIndex = m_mapFeatureIndex[uiFeatureId];
-	CAM_FeatureDesc*    pFeatureDesc = &m_pFeatureDesc[uiIndex];
-	CAM_FeatureValue*   pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
+	lx_uint32 index = mapFeatureIndex_[uiFeatureId];
+	CAM_FeatureDesc*    featureDesc = &featureDesc_[index];
+	CAM_FeatureValue*   featureValue = &vectFeatureValue_.pstFeatureValue[index];
 
 	if (eAct == MM::BeforeGet)
 	{
-		for (lx_uint32 i = 0; i < pFeatureDesc->uiListCount; i++)
+		for (lx_uint32 i = 0; i < featureDesc->uiListCount; i++)
 		{
-			if (pFeatureDesc->stElementList[i].varValue.ui32Value == pFeatureValue->stVariant.ui32Value)
+			if (featureDesc->stElementList[i].varValue.ui32Value == featureValue->stVariant.ui32Value)
 			{
-				wcstombs(strWork, pFeatureDesc->stElementList[i].wszComment, CAM_FEA_COMMENT_MAX);
+				wcstombs(strWork, featureDesc->stElementList[i].wszComment, CAM_FEA_COMMENT_MAX);
 				pProp->Set(strWork);
 				break;
 			}
@@ -1724,14 +1750,14 @@ int NikonKsCam::OnList(MM::PropertyBase* pProp, MM::ActionType eAct, lx_uint32 u
 		string value;
 		lx_uint32 i;
 		pProp->Get(value);
-		for (i = 0; i < pFeatureDesc->uiListCount; i++)
+		for (i = 0; i < featureDesc->uiListCount; i++)
 		{
-			wcstombs(strWork, pFeatureDesc->stElementList[i].wszComment, CAM_FEA_COMMENT_MAX);
+			wcstombs(strWork, featureDesc->stElementList[i].wszComment, CAM_FEA_COMMENT_MAX);
 			if (value.compare(strWork) == 0)
 			{
-				pFeatureValue->stVariant.ui32Value = pFeatureDesc->stElementList[i].varValue.ui32Value;
-				SetFeature(pFeatureValue->uiFeatureId);
-				updateImageSettings();
+				featureValue->stVariant.ui32Value = featureDesc->stElementList[i].varValue.ui32Value;
+				SetFeature(featureValue->uiFeatureId);
+				UpdateImageSettings();
 				break;
 			}
 		}
@@ -1744,75 +1770,23 @@ int NikonKsCam::OnList(MM::PropertyBase* pProp, MM::ActionType eAct, lx_uint32 u
 //Generic- Set either exposure time or exposure time limit
 int NikonKsCam::OnExposureChange(MM::PropertyBase* pProp, MM::ActionType eAct, lx_uint32 uiFeatureId)
 {
-	lx_uint32 uiIndex = m_mapFeatureIndex[uiFeatureId];
+	lx_uint32 index = mapFeatureIndex_[uiFeatureId];
 
 	if (eAct == MM::BeforeGet)
 	{
-		pProp->Set(m_vectFeatureValue.pstFeatureValue[uiIndex].stVariant.ui32Value / 1000.);
+		pProp->Set(vectFeatureValue_.pstFeatureValue[index].stVariant.ui32Value / 1000.);
 	}
 	else if (eAct == MM::AfterSet)
 	{
 		double value;
-		CAM_FeatureValue*   pFeatureValue;
+		CAM_FeatureValue*   featureValue;
 		pProp->Get(value);
 		value = (value * 1000)+0.5;
-		pFeatureValue = &m_vectFeatureValue.pstFeatureValue[uiIndex];
-		value = AdjustExposureTime((unsigned int)value);
+		featureValue = &vectFeatureValue_.pstFeatureValue[index];
+		//value = AdjustExposureTime((unsigned int)value);
 
-		pFeatureValue->stVariant.ui32Value = value;
-		SetFeature(pFeatureValue->uiFeatureId);
+		featureValue->stVariant.ui32Value = value;
+		SetFeature(featureValue->uiFeatureId);
 	}
 	return DEVICE_OK;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// Utility functions copied from Nikon SDK example code
-///////////////////////////////////////////////////////////////////////////////
-/* format exposure time */
-lx_uint32 NikonKsCam::AdjustExposureTime(lx_uint32 uiValue)
-{
-	lx_uint32   len, i, dev, val;
-
-	char buffer[64];
-	len = sprintf(buffer, "%u", uiValue);
-
-	if (len >= 6)
-	{
-		dev = 1;
-		for (i = 0; i<len - 3; i++)
-		{
-			dev *= 10;
-		}
-		val = (uiValue / dev) * dev;
-	}
-	else if (len >= 3)
-	{
-		val = (uiValue / 100) * 100;
-	}
-	else
-	{
-		val = 100;
-	}
-	return val;
-}
-
-/* convert uiFeatureId to readable name */
-const char* NikonKsCam::ConvFeatureIdToName(const lx_uint32 uiFeatureId)
-{
-	lx_uint32       i;
-	auto* p_featureName= new char[30];
-
-	for (i = 0;; i++)
-	{
-		if (stFeatureNameRef[i].uiFeatureId == eUnknown)
-		{
-			break;
-		}
-		if (stFeatureNameRef[i].uiFeatureId == uiFeatureId)
-		{
-			break;
-		}
-	}
-	wcstombs(p_featureName, (wchar_t const *)stFeatureNameRef[i].wszName, 30);
-	return p_featureName;
 }
