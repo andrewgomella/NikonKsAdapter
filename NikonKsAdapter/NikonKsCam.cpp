@@ -379,23 +379,23 @@ int NikonKsCam::Initialize()
 	os.str("");
 	// Read Only Camera Info
 	os << device_.uiSerialNo << endl;
-	nRet = CreateProperty("Serial Number", os.str().c_str(), MM::String, true);
+	nRet |= CreateProperty("Serial Number", os.str().c_str(), MM::String, true);
 	wcstombs(strWork, reinterpret_cast<wchar_t const*>(device_.wszFwVersion), CAM_VERSION_MAX);
-	nRet = CreateProperty("FW Version", strWork, MM::String, true);
+	nRet |= CreateProperty("FW Version", strWork, MM::String, true);
 	wcstombs(strWork, reinterpret_cast<wchar_t const*>(device_.wszFpgaVersion), CAM_VERSION_MAX);
-	nRet = CreateProperty("FPGA Version", strWork, MM::String, true);
+	nRet |= CreateProperty("FPGA Version", strWork, MM::String, true);
 	wcstombs(strWork, reinterpret_cast<wchar_t const*>(device_.wszFx3Version), CAM_VERSION_MAX);
-	nRet = CreateProperty("FX3 Version", strWork, MM::String, true);
+	nRet |= CreateProperty("FX3 Version", strWork, MM::String, true);
 	wcstombs(strWork, reinterpret_cast<wchar_t const*>(device_.wszUsbVersion), CAM_VERSION_MAX);
-	nRet = CreateProperty("USB Version", strWork, MM::String, true);
+	nRet |= CreateProperty("USB Version", strWork, MM::String, true);
 	wcstombs(strWork, reinterpret_cast<wchar_t const*>(device_.wszDriverVersion), CAM_VERSION_MAX);
-	nRet = CreateProperty("Driver Version", strWork, MM::String, true);
+	nRet |= CreateProperty("Driver Version", strWork, MM::String, true);
 	assert(nRet == DEVICE_OK);
 
 
 	//Binning is handled by the Image Format setting and this camera only allows hardware bin 3
-	nRet = CreateProperty(MM::g_Keyword_Binning, "1", MM::Integer, false);
-	nRet = AddAllowedValue(MM::g_Keyword_Binning, "1");
+	nRet |= CreateProperty(MM::g_Keyword_Binning, "1", MM::Integer, false);
+	nRet |= AddAllowedValue(MM::g_Keyword_Binning, "1");
 	assert(nRet == DEVICE_OK);
 
 	//Exposure
